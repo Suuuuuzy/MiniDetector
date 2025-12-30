@@ -4,23 +4,45 @@ import json
 import time
 import tiktoken
 import re
+import copy
 encoding = tiktoken.get_encoding("cl100k_base")
 
-openai.api_key = "XXX"
-openai.api_base = "XXX"
+# API credentials - can be set via set_api_credentials() function
+openai.api_key = os.getenv("OPENAI_API_KEY", "XXX")
+openai.api_base = os.getenv("OPENAI_API_BASE", "XXX")
 
-typeOntologyFilePath = r"ontology\type.json"
-operationOntologyFilePath = r"ontology\operation.json"
+def set_api_credentials(api_key, api_base="https://api.openai.com/v1"):
+    """Set OpenAI API credentials."""
+    openai.api_key = api_key
+    openai.api_base = api_base
+
+# Get the directory where this file is located
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_ontology_dir = os.path.join(os.path.dirname(_current_dir), "ontology")
+
+typeOntologyFilePath = os.path.join(_ontology_dir, "type.json")
+operationOntologyFilePath = os.path.join(_ontology_dir, "operation.json")
+
 # load ontology
-typeOntology = json.load(open(typeOntologyFilePath,"r",encoding="utf-8"))
+typeOntologyData = json.load(open(typeOntologyFilePath,"r",encoding="utf-8"))
 typeCategoryList = []
-for to in typeOntology:
+typeOntology = {}  # Maps core_word -> information_type
+for to in typeOntologyData:
     typeCategoryList.append(to["information_type"])
+    # Build mapping from core_words to information_type
+    for core_word in to["core_word"]:
+        if core_word not in typeOntology:
+            typeOntology[core_word] = to["information_type"]
 
-operationOntology = json.load(open(operationOntologyFilePath,"r",encoding="utf-8"))
+operationOntologyData = json.load(open(operationOntologyFilePath,"r",encoding="utf-8"))
 operationCategoryList = []
-for oo in operationOntology:
+operationOntology = {}  # Maps operation word -> type
+for oo in operationOntologyData:
     operationCategoryList.append(oo["type"])
+    # Build mapping from words to operation type
+    for word in oo["words"]:
+        if word not in operationOntology:
+            operationOntology[word] = oo["type"]
 
 
 def getPracticeByCompletion(content):
@@ -37,7 +59,7 @@ def getPracticeByCompletion(content):
             },
             {
                 "role": "assistant",
-                "content": "[(收集,个人姓名),(收集,手机号码)]"
+                "content": "[(收集,姓名),(收集,电话)]"
             },
             {
                 "role": "user",
@@ -45,7 +67,7 @@ def getPracticeByCompletion(content):
             },
             {
                 "role": "assistant",
-                "content": "[(使用,个人姓名),(使用,性别)]"
+                "content": "[(使用,姓名),(使用,性别)]"
             },
             {
                 "role": "user",
@@ -53,7 +75,7 @@ def getPracticeByCompletion(content):
             },
             {
                 "role": "assistant",
-                "content": "[(使用,居住地址)]"
+                "content": "[(使用,地址)]"
             },
             {
                 "role": "user",
@@ -88,7 +110,7 @@ def selfVerificationType(inputType):
             },
             {
                 "role": "assistant",
-                "content": "[(手机号码,电话号码), (邮箱账号,电子邮件地址)]"
+                "content": "[(手机号码,电话), (邮箱账号,电子邮件地址)]"
             },
             {
                 "role": "user",
@@ -191,7 +213,7 @@ def getEntity(policyContent):
                     "role": "assistant",
                     "content": str(response["choices"][0]["message"]["content"].encode("utf-8"), "utf-8")
                 },
-                "finish_reason": response["choices"][i]["finish_reason"]
+                "finish_reason": response["choices"][0]["finish_reason"]
             })
             responseList.append(newResponse)
     except Exception as e:
@@ -253,6 +275,12 @@ def sti(policyContent):
         else:
             cutListTW.append(copy.deepcopy(currentList))
             currentList = []
+            currentList.append(popString)  # Don't forget the item that triggered the cut
+    
+    # Add the remaining items
+    if currentList:
+        cutListTW.append(copy.deepcopy(currentList))
+        currentList = []
     
     while len(waitingForTwiceAskingOperationWord) > 0:
         popString = waitingForTwiceAskingOperationWord.pop(0)
@@ -261,6 +289,12 @@ def sti(policyContent):
         else:
             cutListOW.append(copy.deepcopy(currentList))
             currentList = []
+            currentList.append(popString)  # Don't forget the item that triggered the cut
+    
+    # Add the remaining items
+    if currentList:
+        cutListOW.append(copy.deepcopy(currentList))
+        currentList = []
         
     print("Cut Finished, seg: %s, %s" % (len(cutListTW), len(cutListOW)))
     print("Second Turn.")
@@ -292,57 +326,54 @@ def sti(policyContent):
                 if x not in operationOntology and y in operationCategoryList:
                     operationOntology[x] = y
 
-        # 重新计算结果
-        newResultUsingAskingTwice = []
-        for fr in formatResultDict:
-            formatTuple = eval(fr)
-            formatOperation = formatTuple[0]
-            formatType = formatTuple[1]
-            if formatType in typeCategoryList and formatOperation in operationCategoryList:
-                if fr not in newResultUsingAskingTwice:
-                    newResultUsingAskingTwice.append(fr)
-            if formatType in typeOntology and formatOperation in operationOntology and fr not in newResultUsingAskingTwice:
-                newPractice = str((operationOntology[formatOperation],typeOntology[formatType]))
-                if not newPractice in newResultUsingAskingTwice:
-                    newResultUsingAskingTwice.append(newPractice)           
+    # 重新计算结果 (moved outside the loop)
+    newResultUsingAskingTwice = []
+    for fr in formatResultDict:
+        formatTuple = eval(fr)
+        formatOperation = formatTuple[0]
+        formatType = formatTuple[1]
+        if formatType in typeCategoryList and formatOperation in operationCategoryList:
+            if fr not in newResultUsingAskingTwice:
+                newResultUsingAskingTwice.append(fr)
+        if formatType in typeOntology and formatOperation in operationOntology and fr not in newResultUsingAskingTwice:
+            newPractice = str((operationOntology[formatOperation],typeOntology[formatType]))
+            if not newPractice in newResultUsingAskingTwice:
+                newResultUsingAskingTwice.append(newPractice)           
+
+    # 为保证输出结果的稳定性，过滤统计多次出现的DP
+    newFormatDictThresholdDict = {}
+    newFormatDictThreshold = []
+    for fmr in formatResultDict:
+        formatTuple = eval(fmr)
+        formatOperation = formatTuple[0]
+        formatType = formatTuple[1]
+        if formatType in typeCategoryList and formatOperation in operationCategoryList:
+            if fmr not in newFormatDictThresholdDict:
+                newFormatDictThresholdDict[fmr] = formatResultDict[fmr]
+                continue
+            else:
+                newFormatDictThresholdDict[fmr] += formatResultDict[fmr]
+                continue
+        elif formatType in typeOntology and formatOperation in operationOntology:
+            newPractice = str((operationOntology[formatOperation],typeOntology[formatType]))
+            if not str(newPractice) in newFormatDictThresholdDict:
+                newFormatDictThresholdDict[str(newPractice)] = formatResultDict[fmr]
+                continue
+            else:
+                newFormatDictThresholdDict[str(newPractice)] += formatResultDict[fmr]
+                continue
+    print(newFormatDictThreshold)
     
-        # 为保证输出结果的稳定性，过滤统计多次出现的DP
-        newFormatDictThresholdDict = {}
-        newFormatDictThreshold = []
-        for fmr in formatResultDict:
-            formatTuple = eval(fmr)
-            formatOperation = formatTuple[0]
-            formatType = formatTuple[1]
-            if formatType in typeCategoryList and formatOperation in operationCategoryList:
-                if fmr not in newFormatDictThresholdDict:
-                    newFormatDictThresholdDict[fmr] = formatResultDict[fmr]
-                    continue
-                else:
-                    newFormatDictThresholdDict[fmr] += formatResultDict[fmr]
-                    continue
-            elif formatType in typeOntology and formatOperation in operationOntology:
-                newPractice = str((operationOntology[formatOperation],typeOntology[formatType]))
-                if not str(newPractice) in newFormatDictThresholdDict:
-                    newFormatDictThresholdDict[str(newPractice)] = formatResultDict[fmr]
-                    continue
-                else:
-                    newFormatDictThresholdDict[str(newPractice)] += formatResultDict[fmr]
-                    continue
-        print(newFormatDictThreshold)
-        
-        for xft in newFormatDictThresholdDict:
-            if newFormatDictThresholdDict[xft] >= 3 and xft not in newFormatDictThreshold:
-                newFormatDictThreshold.append(xft)    
-        
-        processedResult = [
-            {
-                "delete": newResultUsingDelete,
-                "askingTwice": newResultUsingAskingTwice,
-                "threshold": newFormatDictThreshold
-            }
-        ]
-        
-        return processedResult
+    for xft in newFormatDictThresholdDict:
+        if newFormatDictThresholdDict[xft] >= 3 and xft not in newFormatDictThreshold:
+            newFormatDictThreshold.append(xft)    
     
-ee = getEntity("XXX")
-eep = sti(ee)
+    processedResult = [
+        {
+            "delete": newResultUsingDelete,
+            "askingTwice": newResultUsingAskingTwice,
+            "threshold": newFormatDictThreshold
+        }
+    ]
+    
+    return processedResult
